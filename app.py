@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import os
 import glob
+import json
 
 # Configure matplotlib for better visualization
 rcParams['font.family'] = 'sans-serif'
@@ -49,14 +50,49 @@ def get_excel_file():
     return excel_files[0]
 
 
-# Load and prepare background data
+# Find the JSON file in the data folder
+def get_json_file():
+    json_files = glob.glob('data/*.json')
+    if len(json_files) != 1:
+        st.error("Expected exactly one JSON file in the 'data' folder.")
+        return None
+    return json_files[0]
+
+
+# Load normalization method from JSON
+@st.cache_data
+def load_norm_method():
+    json_file = get_json_file()
+    if json_file is None:
+        return 'none'
+    try:
+        with open(json_file, 'r') as f:
+            config = json.load(f)
+        norm_method = config.get('input_norm', 'none')
+        if norm_method not in ['ext', 'avg', 'avgext', 'avgstd', 'none']:
+            st.error(f"Invalid normalization method in JSON: {norm_method}. Using 'none'.")
+            return 'none'
+        return norm_method
+    except Exception as e:
+        st.error(f"Error reading JSON file: {str(e)}. Using 'none'.")
+        return 'none'
+
+
+# Load and prepare background data and normalization parameters
 @st.cache_data
 def load_background_data():
     excel_file = get_excel_file()
     if excel_file is None:
-        return None
+        return None, None
     df = pd.read_excel(excel_file)
-    return df.iloc[:, :-2]  # Exclude the last column (target)
+    features = df.iloc[:, :-1]  # Exclude the last column (target)
+    # Calculate normalization parameters for each feature
+    param = {
+        'mean': features.mean(),
+        'max': features.max(),
+        'std': features.std()
+    }
+    return features, param
 
 
 # Determine model type and class labels
@@ -83,14 +119,33 @@ def load_model():
     return tf.keras.models.load_model('data/MODEL.h5')
 
 
+# Normalization operations
+norm_op_dict = {
+    'ext': lambda data, param: data / param.get('max', 1),
+    'avg': lambda data, param: data - param.get('mean', 0),
+    'avgext': lambda data, param: (data - param.get('mean', 0)) / param.get('max', 1),
+    'avgstd': lambda data, param: (data - param.get('mean', 0)) / param.get('std', 1),
+    'none': lambda data, param: data
+}
+
+# Denormalization operations
+denorm_op_dict = {
+    'ext': lambda data, param: data * param.get('max', 1),
+    'avg': lambda data, param: data + param.get('mean', 0),
+    'avgext': lambda data, param: data * param.get('max', 1) + param.get('mean', 0),
+    'avgstd': lambda data, param: data * param.get('std', 1) + param.get('mean', 0),
+    'none': lambda data, param: data
+}
+
 # Initialize data and model
-background_data = load_background_data()
+background_data, norm_params = load_background_data()
 if background_data is None:
     st.stop()
 
 model = load_model()
+norm_method = load_norm_method()
 
-# Default values for features
+# Default values for features (use raw, non-normalized values)
 default_values = background_data.iloc[0, :].to_dict()
 
 # Determine model type
@@ -123,17 +178,41 @@ for i, feature in enumerate(features):
         )
 
 
-# Prepare input data
+# Prepare input data with normalization
 def prepare_input_data():
-    return pd.DataFrame([values])
+    input_df = pd.DataFrame([values])
+    # Apply normalization
+    norm_func = norm_op_dict.get(norm_method, norm_op_dict['none'])
+    normalized_data = input_df.copy()
+    for col in input_df.columns:
+        normalized_data[col] = norm_func(input_df[col], {
+            'mean': norm_params['mean'].get(col, 0),
+            'max': norm_params['max'].get(col, 1),
+            'std': norm_params['std'].get(col, 1)
+        })
+    return normalized_data, input_df  # Return both normalized and original for SHAP
 
 
 # Main analysis
 if st.button("Analyze Calculation", key="calculate"):
-    input_df = prepare_input_data()
+    normalized_input_df, original_input_df = prepare_input_data()
 
     # Prediction
-    prediction = model.predict(input_df.values, verbose=0)[0][0]
+    prediction = model.predict(normalized_input_df.values, verbose=0)[0][0]
+
+    # Denormalize prediction for regression models
+    if model_type == "regression":
+        denorm_func = denorm_op_dict.get(norm_method, denorm_op_dict['none'])
+        # Assume prediction corresponds to the target column's normalization
+        target_params = {
+            'mean': norm_params['mean'].mean(),  # Average mean across features as fallback
+            'max': norm_params['max'].max(),  # Max of max across features as fallback
+            'std': norm_params['std'].mean()  # Average std across features as fallback
+        }
+        display_prediction = denorm_func(prediction, target_params)
+    else:
+        display_prediction = prediction  # Classification: use raw probability
+
     with st.container():
         st.header("📈 Prediction Result")
         col1, col2 = st.columns(2)
@@ -151,7 +230,7 @@ if st.button("Analyze Calculation", key="calculate"):
                 # Regression model display
                 st.metric(
                     "Predicted Value",
-                    f"{prediction:.4f}"
+                    f"{display_prediction:.4f}"
                 )
         with col2:
             if model_type == "classification":
@@ -168,9 +247,9 @@ if st.button("Analyze Calculation", key="calculate"):
                     f"{df_y.min():.2f} - {df_y.max():.2f}"
                 )
 
-    # SHAP explanation
+    # SHAP explanation (use normalized data for model, original for display)
     explainer = shap.DeepExplainer(model, background_data.values)
-    shap_values = np.squeeze(np.array(explainer.shap_values(input_df.values)))
+    shap_values = np.squeeze(np.array(explainer.shap_values(normalized_input_df.values)))
     base_value = float(explainer.expected_value[0].numpy())
 
     # Visualization tabs
@@ -183,8 +262,8 @@ if st.button("Analyze Calculation", key="calculate"):
             explanation = shap.Explanation(
                 values=shap_values,
                 base_values=base_value,
-                feature_names=input_df.columns,
-                data=input_df.values.round(3)
+                feature_names=original_input_df.columns,
+                data=original_input_df.values.round(3)  # Use original values for display
             )
             shap.plots.force(explanation, matplotlib=True, show=False, figsize=(20, 4))
             st.pyplot(plt.gcf(), clear_figure=True)
@@ -194,11 +273,11 @@ if st.button("Analyze Calculation", key="calculate"):
         col1, col2 = st.columns([2, 2])
         with col1:
             fig, ax = plt.subplots(figsize=(6, 3))
-            shap.decision_plot(base_value, shap_values, input_df.columns, show=False)
+            shap.decision_plot(base_value, shap_values, original_input_df.columns, show=False)
             st.pyplot(plt.gcf(), clear_figure=True)
 
     with tab3:
         st.subheader("Mechanistic Insights")
-        importance_df = pd.DataFrame({'Feature': input_df.columns, 'SHAP Value': shap_values})
+        importance_df = pd.DataFrame({'Feature': original_input_df.columns, 'SHAP Value': shap_values})
         importance_df = importance_df.sort_values('SHAP Value', ascending=False)
         st.dataframe(importance_df.style.background_gradient(cmap='coolwarm', subset=['SHAP Value']))
