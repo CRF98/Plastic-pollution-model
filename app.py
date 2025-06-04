@@ -56,7 +56,7 @@ def load_background_data():
     if excel_file is None:
         return None
     df = pd.read_excel(excel_file)
-    return df.iloc[:, :-1]  # Exclude the last column (target)
+    return df.iloc[:, :-2]  # Exclude the last column (target)
 
 
 # Determine model type and class labels
