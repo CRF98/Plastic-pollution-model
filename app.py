@@ -208,14 +208,6 @@ if st.button("Analyze Calculation", key="calculate"):
     else:
         display_prediction = prediction
 
-    # Debugging information
-    st.write(f"Debug: Input Normalization Method: {input_norm}")
-    st.write(f"Debug: Output Normalization Method: {output_norm}")
-    st.write(f"Debug: Raw Input (normalized): {normalized_input_df.iloc[0].values}")
-    st.write(f"Debug: Raw Prediction (normalized): {prediction:.4f}")
-    st.write(f"Debug: Target Params (mean, max, std): {target_params['mean']:.4f}, {target_params['max']:.4f}, {target_params['std']:.4f}")
-    st.write(f"Debug: Display Prediction (denormalized): {display_prediction:.4f}")
-
     with st.container():
         st.header("📈 Prediction Result")
         col1, col2 = st.columns(2)
@@ -251,11 +243,6 @@ if st.button("Analyze Calculation", key="calculate"):
     explainer = shap.DeepExplainer(model, background_data.values)
     shap_values = np.squeeze(np.array(explainer.shap_values(normalized_input_df.values)))
     base_value = float(explainer.expected_value[0].numpy())
-
-    # Debug SHAP values
-    st.write(f"Debug: SHAP Base Value: {base_value:.4f}")
-    st.write(f"Debug: SHAP f(x): {np.sum(shap_values):.4f}")
-    st.write(f"Debug: SHAP f(x) + Base Value: {base_value + np.sum(shap_values):.4f}")
 
     # Visualization tabs
     tab1, tab2, tab3 = st.tabs(["Force Plot", "Decision Plot", "Mechanistic Insights"])
