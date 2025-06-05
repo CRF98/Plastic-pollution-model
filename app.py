@@ -40,7 +40,6 @@ st.markdown("""
     Adjust the feature value in the sidebar to observe the changes in the prediction results and SHAP values.
 """)
 
-
 # Find the Excel file in the data folder
 def get_excel_file():
     excel_files = glob.glob('data/*.xlsx')
@@ -49,7 +48,6 @@ def get_excel_file():
         return None
     return excel_files[0]
 
-
 # Find the JSON file in the data folder
 def get_json_file():
     json_files = glob.glob('data/*.json')
@@ -57,7 +55,6 @@ def get_json_file():
         st.error("Expected exactly one JSON file in the 'data' folder.")
         return None
     return json_files[0]
-
 
 # Load normalization method from JSON
 @st.cache_data
@@ -77,23 +74,26 @@ def load_norm_method():
         st.error(f"Error reading JSON file: {str(e)}. Using 'none'.")
         return 'none'
 
-
 # Load and prepare background data and normalization parameters
 @st.cache_data
 def load_background_data():
     excel_file = get_excel_file()
     if excel_file is None:
-        return None, None
+        return None, None, None
     df = pd.read_excel(excel_file)
     features = df.iloc[:, :-2]  # Exclude the last column (target)
-    # Calculate normalization parameters for each feature
-    param = {
+    target = df.iloc[:, -1]  # Target column
+    feature_params = {
         'mean': features.mean(),
         'max': features.max(),
         'std': features.std()
     }
-    return features, param
-
+    target_params = {
+        'mean': target.mean(),
+        'max': target.max(),
+        'std': target.std()
+    }
+    return features, feature_params, target_params
 
 # Determine model type and class labels
 @st.cache_data
@@ -112,12 +112,10 @@ def determine_model_type():
         model_type = "regression"
         return model_type, None
 
-
 # Load the pre-trained model
 @st.cache_resource
 def load_model():
     return tf.keras.models.load_model('data/MODEL.h5')
-
 
 # Normalization operations
 norm_op_dict = {
@@ -138,7 +136,7 @@ denorm_op_dict = {
 }
 
 # Initialize data and model
-background_data, norm_params = load_background_data()
+background_data, feature_params, target_params = load_background_data()
 if background_data is None:
     st.stop()
 
@@ -177,21 +175,20 @@ for i, feature in enumerate(features):
             key=feature
         )
 
-
 # Prepare input data with normalization
 def prepare_input_data():
     input_df = pd.DataFrame([values])
-    # Apply normalization
     norm_func = norm_op_dict.get(norm_method, norm_op_dict['none'])
     normalized_data = input_df.copy()
     for col in input_df.columns:
         normalized_data[col] = norm_func(input_df[col], {
-            'mean': norm_params['mean'].get(col, 0),
-            'max': norm_params['max'].get(col, 1),
-            'std': norm_params['std'].get(col, 1)
+            'mean': feature_params['mean'].get(col, 0),
+            'max': feature_params['max'].get(col, 1),
+            'std': feature_params['std'].get(col, 1)
         })
-    return normalized_data, input_df  # Return both normalized and original for SHAP
-
+    if norm_method == 'none':
+        st.warning("Input data is not normalized. Ensure the model was trained on non-normalized data, or prediction may be incorrect.")
+    return normalized_data, input_df
 
 # Main analysis
 if st.button("Analyze Calculation", key="calculate"):
@@ -203,22 +200,22 @@ if st.button("Analyze Calculation", key="calculate"):
     # Denormalize prediction for regression models
     if model_type == "regression":
         denorm_func = denorm_op_dict.get(norm_method, denorm_op_dict['none'])
-        # Assume prediction corresponds to the target column's normalization
-        target_params = {
-            'mean': norm_params['mean'].mean(),  # Average mean across features as fallback
-            'max': norm_params['max'].max(),  # Max of max across features as fallback
-            'std': norm_params['std'].mean()  # Average std across features as fallback
-        }
         display_prediction = denorm_func(prediction, target_params)
     else:
-        display_prediction = prediction  # Classification: use raw probability
+        display_prediction = prediction
+
+    # Debugging information
+    st.write(f"Debug: Normalization Method: {norm_method}")
+    st.write(f"Debug: Raw Input (normalized): {normalized_input_df.iloc[0].values}")
+    st.write(f"Debug: Raw Prediction (normalized): {prediction:.4f}")
+    st.write(f"Debug: Target Params (mean, max, std): {target_params['mean']:.4f}, {target_params['max']:.4f}, {target_params['std']:.4f}")
+    st.write(f"Debug: Display Prediction (denormalized): {display_prediction:.4f}")
 
     with st.container():
         st.header("📈 Prediction Result")
         col1, col2 = st.columns(2)
         with col1:
             if model_type == "classification":
-                # Classification model display
                 predicted_class = class_labels[1] if prediction >= 0.5 else class_labels[0]
                 st.metric(
                     "Probability",
@@ -227,7 +224,6 @@ if st.button("Analyze Calculation", key="calculate"):
                     delta_color="inverse"
                 )
             else:
-                # Regression model display
                 st.metric(
                     "Predicted Value",
                     f"{display_prediction:.4f}"
@@ -239,7 +235,6 @@ if st.button("Analyze Calculation", key="calculate"):
                     f"0.5"
                 )
             else:
-                # Display statistical information for regression model
                 excel_file = get_excel_file()
                 df_y = pd.read_excel(excel_file).iloc[:, -1]
                 st.metric(
@@ -247,7 +242,7 @@ if st.button("Analyze Calculation", key="calculate"):
                     f"{df_y.min():.2f} - {df_y.max():.2f}"
                 )
 
-    # SHAP explanation (use normalized data for model, original for display)
+    # SHAP explanation
     explainer = shap.DeepExplainer(model, background_data.values)
     shap_values = np.squeeze(np.array(explainer.shap_values(normalized_input_df.values)))
     base_value = float(explainer.expected_value[0].numpy())
@@ -263,7 +258,7 @@ if st.button("Analyze Calculation", key="calculate"):
                 values=shap_values,
                 base_values=base_value,
                 feature_names=original_input_df.columns,
-                data=original_input_df.values.round(3)  # Use original values for display
+                data=original_input_df.values.round(3)
             )
             shap.plots.force(explanation, matplotlib=True, show=False, figsize=(20, 4))
             st.pyplot(plt.gcf(), clear_figure=True)
