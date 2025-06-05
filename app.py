@@ -78,6 +78,17 @@ def load_norm_method():
         return 'none'
 
 
+# Load target normalization parameters
+@st.cache_data
+def load_target_norm():
+    json_file = get_json_file()
+    if json_file is None:
+        return {'mean': 0, 'std': 1}
+    with open(json_file, 'r') as f:
+        config = json.load(f)
+    return config.get('target_norm', {'mean': 0, 'std': 1})
+
+
 # Load and prepare background data and normalization parameters
 @st.cache_data
 def load_background_data():
@@ -85,7 +96,7 @@ def load_background_data():
     if excel_file is None:
         return None, None
     df = pd.read_excel(excel_file)
-    features = df.iloc[:, :-2]  # Exclude the last column (target)
+    features = df.iloc[:, :-1]  # Exclude last column (target)
     # Calculate normalization parameters for each feature
     param = {
         'mean': features.mean(),
@@ -144,6 +155,7 @@ if background_data is None:
 
 model = load_model()
 norm_method = load_norm_method()
+target_norm = load_target_norm()
 
 # Default values for features (use raw, non-normalized values)
 default_values = background_data.iloc[0, :].to_dict()
@@ -203,22 +215,16 @@ if st.button("Analyze Calculation", key="calculate"):
     # Denormalize prediction for regression models
     if model_type == "regression":
         denorm_func = denorm_op_dict.get(norm_method, denorm_op_dict['none'])
-        # Assume prediction corresponds to the target column's normalization
-        target_params = {
-            'mean': norm_params['mean'].mean(),  # Average mean across features as fallback
-            'max': norm_params['max'].max(),  # Max of max across features as fallback
-            'std': norm_params['std'].mean()  # Average std across features as fallback
-        }
-        display_prediction = denorm_func(prediction, target_params)
+        display_prediction = denorm_func(prediction, target_norm)
     else:
         display_prediction = prediction  # Classification: use raw probability
 
+    # Display prediction result
     with st.container():
         st.header("📈 Prediction Result")
         col1, col2 = st.columns(2)
         with col1:
             if model_type == "classification":
-                # Classification model display
                 predicted_class = class_labels[1] if prediction >= 0.5 else class_labels[0]
                 st.metric(
                     "Probability",
@@ -227,7 +233,6 @@ if st.button("Analyze Calculation", key="calculate"):
                     delta_color="inverse"
                 )
             else:
-                # Regression model display
                 st.metric(
                     "Predicted Value",
                     f"{display_prediction:.4f}"
@@ -239,7 +244,6 @@ if st.button("Analyze Calculation", key="calculate"):
                     f"0.5"
                 )
             else:
-                # Display statistical information for regression model
                 excel_file = get_excel_file()
                 df_y = pd.read_excel(excel_file).iloc[:, -1]
                 st.metric(
@@ -247,7 +251,7 @@ if st.button("Analyze Calculation", key="calculate"):
                     f"{df_y.min():.2f} - {df_y.max():.2f}"
                 )
 
-    # SHAP explanation (use normalized data for model, original for display)
+    # SHAP explanation
     explainer = shap.DeepExplainer(model, background_data.values)
     shap_values = np.squeeze(np.array(explainer.shap_values(normalized_input_df.values)))
     base_value = float(explainer.expected_value[0].numpy())
@@ -257,27 +261,38 @@ if st.button("Analyze Calculation", key="calculate"):
 
     with tab1:
         st.subheader("Force Plot")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            explanation = shap.Explanation(
-                values=shap_values,
-                base_values=base_value,
-                feature_names=original_input_df.columns,
-                data=original_input_df.values.round(3)  # Use original values for display
-            )
-            shap.plots.force(explanation, matplotlib=True, show=False, figsize=(20, 4))
-            st.pyplot(plt.gcf(), clear_figure=True)
+        explanation = shap.Explanation(
+            values=shap_values,
+            base_values=base_value,
+            feature_names=original_input_df.columns,
+            data=original_input_df.values.round(3)
+        )
+        shap.plots.force(explanation, matplotlib=True, show=False, figsize=(20, 4))
+        st.pyplot(plt.gcf(), clear_figure=True)
 
     with tab2:
         st.subheader("Decision Plot")
-        col1, col2 = st.columns([2, 2])
-        with col1:
-            fig, ax = plt.subplots(figsize=(6, 3))
-            shap.decision_plot(base_value, shap_values, original_input_df.columns, show=False)
-            st.pyplot(plt.gcf(), clear_figure=True)
+        fig, ax = plt.subplots(figsize=(6, 3))
+        shap.decision_plot(base_value, shap_values, original_input_df.columns, show=False)
+        st.pyplot(plt.gcf(), clear_figure=True)
 
     with tab3:
         st.subheader("Mechanistic Insights")
         importance_df = pd.DataFrame({'Feature': original_input_df.columns, 'SHAP Value': shap_values})
         importance_df = importance_df.sort_values('SHAP Value', ascending=False)
         st.dataframe(importance_df.style.background_gradient(cmap='coolwarm', subset=['SHAP Value']))
+
+    # Download prediction result
+    result_df = pd.DataFrame([{
+        'Feature': k,
+        'Value': v,
+        'Type': 'Input'
+    } for k, v in values.items()])
+    result_df.loc[len(result_df)] = ['Predicted Value', display_prediction, 'Prediction']
+
+    st.download_button(
+        label="📥 Download Prediction Result",
+        data=result_df.to_csv(index=False),
+        file_name="prediction_result.csv",
+        mime="text/csv"
+    )
