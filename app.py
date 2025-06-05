@@ -56,23 +56,27 @@ def get_json_file():
         return None
     return json_files[0]
 
-# Load normalization method from JSON
+# Load normalization methods from JSON
 @st.cache_data
-def load_norm_method():
+def load_norm_methods():
     json_file = get_json_file()
     if json_file is None:
-        return 'none'
+        return 'none', 'none'
     try:
         with open(json_file, 'r') as f:
             config = json.load(f)
-        norm_method = config.get('input_norm', 'none')
-        if norm_method not in ['ext', 'avg', 'avgext', 'avgstd', 'none']:
-            st.error(f"Invalid normalization method in JSON: {norm_method}. Using 'none'.")
-            return 'none'
-        return norm_method
+        input_norm = config.get('net_property', {}).get('input_norm', 'none')
+        output_norm = config.get('net_property', {}).get('output_norm', input_norm)  # Default to input_norm if not specified
+        if input_norm not in ['ext', 'avg', 'avgext', 'avgstd', 'none']:
+            st.error(f"Invalid input normalization method in JSON: {input_norm}. Using 'none'.")
+            input_norm = 'none'
+        if output_norm not in ['ext', 'avg', 'avgext', 'avgstd', 'none']:
+            st.error(f"Invalid output normalization method in JSON: {output_norm}. Using 'none'.")
+            output_norm = 'none'
+        return input_norm, output_norm
     except Exception as e:
-        st.error(f"Error reading JSON file: {str(e)}. Using 'none'.")
-        return 'none'
+        st.error(f"Error reading JSON file: {str(e)}. Using 'none' for both input and output normalization.")
+        return 'none', 'none'
 
 # Load and prepare background data and normalization parameters
 @st.cache_data
@@ -141,7 +145,7 @@ if background_data is None:
     st.stop()
 
 model = load_model()
-norm_method = load_norm_method()
+input_norm, output_norm = load_norm_methods()
 
 # Default values for features (use raw, non-normalized values)
 default_values = background_data.iloc[0, :].to_dict()
@@ -178,7 +182,7 @@ for i, feature in enumerate(features):
 # Prepare input data with normalization
 def prepare_input_data():
     input_df = pd.DataFrame([values])
-    norm_func = norm_op_dict.get(norm_method, norm_op_dict['none'])
+    norm_func = norm_op_dict.get(input_norm, norm_op_dict['none'])
     normalized_data = input_df.copy()
     for col in input_df.columns:
         normalized_data[col] = norm_func(input_df[col], {
@@ -186,7 +190,7 @@ def prepare_input_data():
             'max': feature_params['max'].get(col, 1),
             'std': feature_params['std'].get(col, 1)
         })
-    if norm_method == 'none':
+    if input_norm == 'none':
         st.warning("Input data is not normalized. Ensure the model was trained on non-normalized data, or prediction may be incorrect.")
     return normalized_data, input_df
 
@@ -199,13 +203,14 @@ if st.button("Analyze Calculation", key="calculate"):
 
     # Denormalize prediction for regression models
     if model_type == "regression":
-        denorm_func = denorm_op_dict.get(norm_method, denorm_op_dict['none'])
+        denorm_func = denorm_op_dict.get(output_norm, denorm_op_dict['none'])
         display_prediction = denorm_func(prediction, target_params)
     else:
         display_prediction = prediction
 
     # Debugging information
-    st.write(f"Debug: Normalization Method: {norm_method}")
+    st.write(f"Debug: Input Normalization Method: {input_norm}")
+    st.write(f"Debug: Output Normalization Method: {output_norm}")
     st.write(f"Debug: Raw Input (normalized): {normalized_input_df.iloc[0].values}")
     st.write(f"Debug: Raw Prediction (normalized): {prediction:.4f}")
     st.write(f"Debug: Target Params (mean, max, std): {target_params['mean']:.4f}, {target_params['max']:.4f}, {target_params['std']:.4f}")
@@ -246,6 +251,11 @@ if st.button("Analyze Calculation", key="calculate"):
     explainer = shap.DeepExplainer(model, background_data.values)
     shap_values = np.squeeze(np.array(explainer.shap_values(normalized_input_df.values)))
     base_value = float(explainer.expected_value[0].numpy())
+
+    # Debug SHAP values
+    st.write(f"Debug: SHAP Base Value: {base_value:.4f}")
+    st.write(f"Debug: SHAP f(x): {np.sum(shap_values):.4f}")
+    st.write(f"Debug: SHAP f(x) + Base Value: {base_value + np.sum(shap_values):.4f}")
 
     # Visualization tabs
     tab1, tab2, tab3 = st.tabs(["Force Plot", "Decision Plot", "Mechanistic Insights"])
